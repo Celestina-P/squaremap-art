@@ -1,0 +1,20 @@
+# SquareShot - gửi ảnh bản đồ squaremap lên Discord bằng webhook.
+#
+# Cách lấy webhook: Discord > chuột phải kênh > Chỉnh sửa kênh > Tích hợp > Webhook > Webhook mới > Sao chép URL.
+webhook-url: ""
+
+# Cứ mỗi bao nhiêu phút thì cập nhật ảnh (sửa lại cùng 1 tin nhắn, không spam kênh).
+interval-minutes: 5
+
+# Tên thư mục thế giới trong squaremap. Để trống = tự chọn thế giới có chữ "overworld".
+world: ""
+
+# Cạnh dài tối đa của ảnh (pixel). Vùng lớn hơn sẽ được thu nhỏ. Khoảng 1024-2048 là hợp lý.
+max-image-size: 2048
+
+# Đường dẫn tới thư mục tile của squaremap. Để trống = plugins/squaremap/web/tiles
+squaremap-tiles-dir: ""
+
+# Tiêu đề và link (tùy chọn) hiện trên khung ảnh trong Discord.
+title: "Bản đồ server"
+map-url: ""

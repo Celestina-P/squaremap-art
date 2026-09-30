@@ -1,0 +1,15 @@
+name: SquareShot
+version: 1.0.0
+main: dev.squareshot.SquareShot
+api-version: '1.21'
+description: Gửi ảnh bản đồ squaremap lên Discord bằng webhook
+softdepend: [squaremap]
+commands:
+  squareshot:
+    description: Điều khiển SquareShot
+    usage: /squareshot <now|reload>
+    aliases: [sshot]
+permissions:
+  squareshot.admin:
+    description: Cho phép dùng /squareshot
+    default: op
