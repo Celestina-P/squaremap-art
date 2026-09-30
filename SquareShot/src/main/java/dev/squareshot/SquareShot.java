@@ -53,11 +53,12 @@ public final class SquareShot extends JavaPlugin {
     private static final int MAX_UPLOAD_BYTES = 8_000_000;
     private static final int TILE_BLOCKS = 512; // squaremap: mỗi tile = 512x512 pixel
 
-    record Settings(String webhook, int intervalMinutes, String world, int maxSize, File tilesDir,
+    record Settings(String webhook, int intervalSeconds, String world, int maxSize, File tilesDir,
                     String title, String mapUrl, String mode, double centerX, double centerZ,
                     double radius, double playersMinRadius, double playersMargin, double pixelsPerBlock,
                     boolean showPlayers, boolean showHealth, boolean showHeads,
-                    double aspect, boolean useEmbed) {
+                    double aspect, boolean useEmbed, int mapRefreshSeconds,
+                    boolean showMapLink, double playerScale) {
     }
 
     record PlayerInfo(String name, List<String> worldIds, double x, double z, float yaw, double health) {
@@ -74,6 +75,12 @@ public final class SquareShot extends JavaPlugin {
     }
 
     private volatile Settings settings;
+    private volatile BufferedImage baseCache;
+    private volatile String baseKey;
+    private volatile long baseAt;
+    private volatile double[] boundsCache;
+    private volatile String boundsKey;
+    private volatile long boundsAt;
     private ScheduledExecutorService executor;
     private ScheduledFuture<?> future;
     private File stateFile;
@@ -109,7 +116,12 @@ public final class SquareShot extends JavaPlugin {
         reloadConfig();
         var c = getConfig();
         String webhook = c.getString("webhook-url", "").trim();
-        int interval = Math.max(1, c.getInt("interval-minutes", 5));
+        int interval = c.getInt("interval-seconds", -1);
+        if (interval <= 0) {
+            interval = Math.max(1, c.getInt("interval-minutes", 5)) * 60; // tương thích config cũ
+        }
+        interval = Math.max(10, interval);
+        int mapRefresh = Math.max(30, c.getInt("map-refresh-seconds", 300));
         String world = c.getString("world", "").trim();
         int maxSize = Math.max(256, Math.min(6144, c.getInt("max-image-size", 2048)));
         String tilesPath = c.getString("squaremap-tiles-dir", "").trim();
@@ -131,7 +143,12 @@ public final class SquareShot extends JavaPlugin {
                 c.getDouble("center-x", 0), c.getDouble("center-z", 0), radius, minRadius, margin, ppb,
                 c.getBoolean("show-players", true), c.getBoolean("show-health", true),
                 c.getBoolean("show-heads", true),
-                parseAspect(c.getString("aspect-ratio", "16:9")), c.getBoolean("use-embed", false));
+                parseAspect(c.getString("aspect-ratio", "16:9")), c.getBoolean("use-embed", false), mapRefresh,
+                c.getBoolean("show-map-link", false), Math.max(0, Math.min(10, c.getDouble("player-scale", 0))));
+        baseCache = null;
+        baseKey = null;
+        boundsCache = null;
+        boundsKey = null;
 
         if (future != null) {
             future.cancel(false);
@@ -145,8 +162,11 @@ public final class SquareShot extends JavaPlugin {
                 && !webhook.startsWith("https://discordapp.com/api/webhooks/")) {
             getLogger().warning("webhook-url có vẻ không phải URL webhook của Discord.");
         }
-        future = executor.scheduleWithFixedDelay(this::safeRun, 20, interval * 60L, TimeUnit.SECONDS);
-        getLogger().info("Sẽ cập nhật ảnh bản đồ mỗi " + interval + " phút (lần đầu sau 20 giây), chế độ: " + mode + ".");
+        future = executor.scheduleWithFixedDelay(this::safeRun, 20, interval, TimeUnit.SECONDS);
+        getLogger().info("Sẽ cập nhật ảnh mỗi " + interval + " giây (lần đầu sau 20 giây), chế độ: " + mode + ".");
+        if (interval < 30) {
+            getLogger().info("Chu kỳ ngắn: mỗi lần cập nhật sẽ tải lại 1 ảnh lên Discord, hãy để ý băng thông của host.");
+        }
     }
 
     /** "16:9" -> 1.777..., "1:1" -> 1, "free" / "none" -> 0 (không ép tỉ lệ). */
@@ -254,7 +274,7 @@ public final class SquareShot extends JavaPlugin {
         try {
             HttpRequest req = HttpRequest.newBuilder(URI.create("https://mc-heads.net/avatar/" + name + "/16"))
                     .timeout(Duration.ofSeconds(6))
-                    .header("User-Agent", "SquareShot/1.2")
+                    .header("User-Agent", "SquareShot/1.4")
                     .GET().build();
             HttpResponse<byte[]> r = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
             if (r.statusCode() / 100 == 2) {
@@ -325,11 +345,11 @@ public final class SquareShot extends JavaPlugin {
                     coarse = l;
                 }
             }
-            double span = (double) TILE_BLOCKS * coarse.step();
-            double x0 = coarse.minX() * span;
-            double x1 = (coarse.maxX() + 1) * span;
-            double z0 = coarse.minZ() * span;
-            double z1 = (coarse.maxZ() + 1) * span;
+            double[] bb = contentBounds(coarse, worldName);
+            double x0 = bb[0];
+            double x1 = bb[1];
+            double z0 = bb[2];
+            double z1 = bb[3];
             cx = (x0 + x1) / 2;
             cz = (z0 + z1) / 2;
             w = x1 - x0;
@@ -392,57 +412,48 @@ public final class SquareShot extends JavaPlugin {
             }
         }
 
+        String key = worldName + "|" + s.mode() + "|" + bx0 + "|" + bz0 + "|" + outW + "x" + outH + "|" + chosen.zoom();
+        long now = System.currentTimeMillis();
+        boolean cacheable = !s.mode().equals("players"); // vùng của mode players thay đổi theo người chơi
+        BufferedImage cached = baseCache;
+        String cachedKey = baseKey;
+
         BufferedImage canvas = new BufferedImage(outW, outH, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = canvas.createGraphics();
         try {
-            g.setColor(new Color(0x1E1F22));
-            g.fillRect(0, 0, outW, outH);
-            boolean upscale = chosen.step() * Math.max(sx, sz) > 1.0 + 1e-9;
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, upscale
-                    ? RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
-                    : RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            double span = (double) TILE_BLOCKS * chosen.step();
-            int drawn = 0;
-            for (Tile t : chosen.tiles()) {
-                double tx0 = t.x() * span;
-                double tz0 = t.z() * span;
-                double tx1 = tx0 + span;
-                double tz1 = tz0 + span;
-                if (tx1 <= bx0 || tx0 >= bx1 || tz1 <= bz0 || tz0 >= bz1) {
-                    continue;
+            if (cacheable && cached != null && key.equals(cachedKey)
+                    && now - baseAt < s.mapRefreshSeconds() * 1000L) {
+                g.drawImage(cached, 0, 0, null); // dùng lại nền bản đồ đã vẽ, chỉ vẽ lại người chơi
+            } else {
+                drawBase(g, chosen, bx0, bx1, bz0, bz1, sx, sz, outW, outH);
+                if (cacheable) {
+                    BufferedImage copy = new BufferedImage(outW, outH, BufferedImage.TYPE_INT_RGB);
+                    Graphics2D cg = copy.createGraphics();
+                    cg.drawImage(canvas, 0, 0, null);
+                    cg.dispose();
+                    baseCache = copy;
+                    baseKey = key;
+                    baseAt = now;
                 }
-                BufferedImage img;
-                try {
-                    img = ImageIO.read(t.file());
-                } catch (Exception e) {
-                    continue; // tile đang được squaremap ghi dở, bỏ qua lần này
-                }
-                if (img == null) {
-                    continue;
-                }
-                int dx0 = (int) Math.round((tx0 - bx0) * sx);
-                int dz0 = (int) Math.round((tz0 - bz0) * sz);
-                int dx1 = (int) Math.round((tx1 - bx0) * sx);
-                int dz1 = (int) Math.round((tz1 - bz0) * sz);
-                g.drawImage(img, dx0, dz0, Math.max(1, dx1 - dx0), Math.max(1, dz1 - dz0), null);
-                drawn++;
-            }
-            if (drawn == 0) {
-                throw new IOException(String.format(Locale.ROOT,
-                        "Vùng quanh (%.0f, %.0f) chưa có tile nào. Đổi center-x/center-z, hoặc render thêm bản đồ.",
-                        (bx0 + bx1) / 2, (bz0 + bz1) / 2));
             }
 
             if (s.showPlayers()) {
+                // phóng to đầu/tên/tim theo kích thước ảnh để vẫn đọc được khi Discord thu nhỏ ảnh
+                double k = s.playerScale() > 0 ? s.playerScale() : Math.max(1.0, Math.max(outW, outH) / 560.0);
+                int logicalW = (int) Math.round(outW / k);
+                int logicalH = (int) Math.round(outH / k);
+                java.awt.geom.AffineTransform oldTx = g.getTransform();
+                g.scale(k, k);
                 for (PlayerInfo p : here) {
-                    int px = (int) Math.round((p.x() - bx0) * sx);
-                    int pz = (int) Math.round((p.z() - bz0) * sz);
-                    if (px < -30 || pz < -30 || px > outW + 30 || pz > outH + 30) {
+                    int px = (int) Math.round((p.x() - bx0) * sx / k);
+                    int pz = (int) Math.round((p.z() - bz0) * sz / k);
+                    if (px < -30 || pz < -30 || px > logicalW + 30 || pz > logicalH + 30) {
                         continue;
                     }
                     BufferedImage head = s.showHeads() ? headOf(p.name()) : null;
-                    Overlay.drawPlayer(g, outW, outH, p, px, pz, head, s.showHealth());
+                    Overlay.drawPlayer(g, logicalW, logicalH, p, px, pz, head, s.showHealth());
                 }
+                g.setTransform(oldTx);
             }
         } finally {
             g.dispose();
@@ -453,6 +464,110 @@ public final class SquareShot extends JavaPlugin {
             throw new IOException("Không mã hóa được ảnh PNG");
         }
         return out.toByteArray();
+    }
+
+    /**
+     * Tìm khung ôm sát phần bản đồ thực sự có màu (bỏ qua vùng trong suốt của các ô tile),
+     * trả về {x0, x1, z0, z1} theo block. Kết quả được nhớ lại theo chu kỳ map-refresh-seconds.
+     */
+    private double[] contentBounds(Layer coarse, String worldKey) {
+        Settings st = settings;
+        long now = System.currentTimeMillis();
+        String key = worldKey + "|" + coarse.zoom() + "|" + coarse.tiles().size();
+        double[] cached = boundsCache;
+        if (cached != null && key.equals(boundsKey)
+                && now - boundsAt < (st == null ? 300 : st.mapRefreshSeconds()) * 1000L) {
+            return cached;
+        }
+        long minPx = Long.MAX_VALUE;
+        long maxPx = Long.MIN_VALUE;
+        long minPz = Long.MAX_VALUE;
+        long maxPz = Long.MIN_VALUE;
+        for (Tile t : coarse.tiles()) {
+            BufferedImage img;
+            try {
+                img = ImageIO.read(t.file());
+            } catch (Exception e) {
+                continue;
+            }
+            if (img == null) {
+                continue;
+            }
+            int w = img.getWidth();
+            int h = img.getHeight();
+            int[] data = img.getRGB(0, 0, w, h, null, 0, w);
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    if ((data[y * w + x] >>> 24) != 0) {
+                        long gx = (long) t.x() * TILE_BLOCKS + x;
+                        long gz = (long) t.z() * TILE_BLOCKS + y;
+                        minPx = Math.min(minPx, gx);
+                        maxPx = Math.max(maxPx, gx);
+                        minPz = Math.min(minPz, gz);
+                        maxPz = Math.max(maxPz, gz);
+                    }
+                }
+            }
+        }
+        double step = coarse.step();
+        double[] b;
+        if (minPx == Long.MAX_VALUE) {
+            double span = (double) TILE_BLOCKS * step;
+            b = new double[]{coarse.minX() * span, (coarse.maxX() + 1) * span,
+                    coarse.minZ() * span, (coarse.maxZ() + 1) * span};
+        } else {
+            double x0 = minPx * step;
+            double x1 = (maxPx + 1) * step;
+            double z0 = minPz * step;
+            double z1 = (maxPz + 1) * step;
+            double margin = Math.max(x1 - x0, z1 - z0) * 0.02 + step;
+            b = new double[]{x0 - margin, x1 + margin, z0 - margin, z1 + margin};
+        }
+        boundsCache = b;
+        boundsKey = key;
+        boundsAt = now;
+        return b;
+    }
+
+    private void drawBase(Graphics2D g, Layer chosen, double bx0, double bx1, double bz0, double bz1,
+                          double sx, double sz, int outW, int outH) throws IOException {
+        g.setColor(new Color(0x1E1F22));
+        g.fillRect(0, 0, outW, outH);
+        boolean upscale = chosen.step() * Math.max(sx, sz) > 1.0 + 1e-9;
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, upscale
+                ? RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
+                : RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        double span = (double) TILE_BLOCKS * chosen.step();
+        int drawn = 0;
+        for (Tile t : chosen.tiles()) {
+            double tx0 = t.x() * span;
+            double tz0 = t.z() * span;
+            double tx1 = tx0 + span;
+            double tz1 = tz0 + span;
+            if (tx1 <= bx0 || tx0 >= bx1 || tz1 <= bz0 || tz0 >= bz1) {
+                continue;
+            }
+            BufferedImage img;
+            try {
+                img = ImageIO.read(t.file());
+            } catch (Exception e) {
+                continue; // tile đang được squaremap ghi dở, bỏ qua lần này
+            }
+            if (img == null) {
+                continue;
+            }
+            int dx0 = (int) Math.round((tx0 - bx0) * sx);
+            int dz0 = (int) Math.round((tz0 - bz0) * sz);
+            int dx1 = (int) Math.round((tx1 - bx0) * sx);
+            int dz1 = (int) Math.round((tz1 - bz0) * sz);
+            g.drawImage(img, dx0, dz0, Math.max(1, dx1 - dx0), Math.max(1, dz1 - dz0), null);
+            drawn++;
+        }
+        if (drawn == 0) {
+            throw new IOException(String.format(Locale.ROOT,
+                    "Vùng quanh (%.0f, %.0f) chưa có tile nào. Đổi center-x/center-z, hoặc render thêm bản đồ.",
+                    (bx0 + bx1) / 2, (bz0 + bz1) / 2));
+        }
     }
 
     private static File pickWorld(File[] dirs, String want) {
@@ -547,14 +662,14 @@ public final class SquareShot extends JavaPlugin {
         if (s.useEmbed()) {
             sb.append("{\"content\":").append(jsonStr("Cập nhật lần cuối: <t:" + now + ":R>"));
             sb.append(",\"embeds\":[{\"title\":").append(jsonStr(s.title()));
-            if (s.mapUrl().startsWith("http://") || s.mapUrl().startsWith("https://")) {
+            if (s.showMapLink() && (s.mapUrl().startsWith("http://") || s.mapUrl().startsWith("https://"))) {
                 sb.append(",\"url\":").append(jsonStr(s.mapUrl()));
             }
             sb.append(",\"color\":5763719,\"image\":{\"url\":\"attachment://map.png\"}}]");
         } else {
             // gửi ảnh dạng file đính kèm: Discord hiển thị to hơn ảnh trong embed
             StringBuilder text = new StringBuilder("**").append(s.title()).append("**");
-            if (s.mapUrl().startsWith("http://") || s.mapUrl().startsWith("https://")) {
+            if (s.showMapLink() && (s.mapUrl().startsWith("http://") || s.mapUrl().startsWith("https://"))) {
                 text.append(" • <").append(s.mapUrl()).append(">");
             }
             text.append("\nCập nhật lần cuối: <t:").append(now).append(":R>");
@@ -571,7 +686,7 @@ public final class SquareShot extends JavaPlugin {
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofSeconds(60))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .header("User-Agent", "SquareShot/1.2")
+                .header("User-Agent", "SquareShot/1.4")
                 .method(method, HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
