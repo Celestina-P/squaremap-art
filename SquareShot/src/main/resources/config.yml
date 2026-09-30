@@ -1,20 +1,66 @@
-# SquareShot - gửi ảnh bản đồ squaremap lên Discord bằng webhook.
+# SquareShot - gửi ảnh bản đồ squaremap (kèm người chơi) lên Discord bằng webhook.
 #
 # Cách lấy webhook: Discord > chuột phải kênh > Chỉnh sửa kênh > Tích hợp > Webhook > Webhook mới > Sao chép URL.
 webhook-url: ""
 
-# Cứ mỗi bao nhiêu phút thì cập nhật ảnh (sửa lại cùng 1 tin nhắn, không spam kênh).
-interval-minutes: 5
+# Cứ mỗi bao nhiêu GIÂY thì cập nhật ảnh (sửa lại cùng 1 tin nhắn, không spam kênh). Tối thiểu 10.
+# Mỗi lần cập nhật là tải lại 1 ảnh lên Discord, nên 30-60 giây là hợp lý; ngắn hơn sẽ tốn băng thông host.
+interval-seconds: 30
+
+# Nền bản đồ (địa hình) chỉ được vẽ lại sau mỗi bấy nhiêu giây; giữa hai lần đó plugin chỉ vẽ lại người chơi
+# lên nền đã có sẵn nên rất nhẹ. Địa hình mới squaremap render sẽ hiện sau tối đa chừng này giây. Tối thiểu 30.
+# (Không áp dụng cho mode players vì vùng chụp thay đổi theo người chơi.)
+map-refresh-seconds: 300
+
+# --- Vùng bản đồ cần chụp ---------------------------------------------------
+# mode: center  = chụp vùng quanh (center-x, center-z), nửa chiều RỘNG = radius-blocks
+#       players = tự chụp quanh nhóm người chơi đang online (không có ai thì dùng như center)
+#       full    = chụp toàn bộ phần đã render, khung ôm sát bản đồ (thu nhỏ cho vừa max-image-size)
+mode: full
+center-x: 0
+center-z: 0
+radius-blocks: 400
+
+# Chỉ dùng cho mode players: nửa cạnh tối thiểu và phần lề thêm quanh người chơi (block).
+players-min-radius: 150
+players-margin: 100
+
+# Tỉ lệ khung hình của ảnh: "16:9", "4:3", "1:1", hoặc "free" (theo hình dạng vùng chụp).
+# Vùng chụp được nới ra cho đủ tỉ lệ, không cắt bớt người chơi hay bản đồ.
+aspect-ratio: "16:9"
+
+# --- Độ nét ------------------------------------------------------------------
+# pixels-per-block: 1 = độ phân giải gốc của squaremap (1 pixel = 1 block), 2-3 = phóng to như khi zoom trên web.
+# Ví dụ mode center, radius-blocks 1000, pixels-per-block 1, aspect 16:9 -> ảnh 2000x1125, đúng độ phân giải gốc.
+# Cạnh dài nhất của ảnh không vượt quá max-image-size (tối đa 6144). Ảnh quá 8MB sẽ tự được thu nhỏ để Discord nhận.
+# mode full với bản đồ lớn thì không thể giữ độ phân giải gốc, chỉ là ảnh tổng quan.
+pixels-per-block: 2
+max-image-size: 2048
+
+# --- Người chơi trên ảnh -----------------------------------------------------
+show-players: true
+show-health: true
+# Tải đầu người chơi từ mc-heads.net theo tên. Server offline-mode thường không có skin, khi đó vẽ ô màu.
+show-heads: true
 
 # Tên thư mục thế giới trong squaremap. Để trống = tự chọn thế giới có chữ "overworld".
 world: ""
 
-# Cạnh dài tối đa của ảnh (pixel). Vùng lớn hơn sẽ được thu nhỏ. Khoảng 1024-2048 là hợp lý.
-max-image-size: 2048
-
 # Đường dẫn tới thư mục tile của squaremap. Để trống = plugins/squaremap/web/tiles
 squaremap-tiles-dir: ""
 
-# Tiêu đề và link (tùy chọn) hiện trên khung ảnh trong Discord.
+# use-embed: false = gửi ảnh dạng file đính kèm (Discord hiển thị to hơn, khuyên dùng)
+#            true  = ảnh nằm trong khung embed có tiêu đề (Discord thu nhỏ còn khoảng 400x300)
+use-embed: false
+
+# Tiêu đề và link (tùy chọn) hiện cùng tin nhắn.
 title: "Bản đồ server"
 map-url: ""
+
+# false (mặc định) = KHÔNG hiện link bản đồ trong tin nhắn, nên không lộ IP/cổng/id map dù map-url có điền.
+# true = hiện map-url cạnh tiêu đề.
+show-map-link: false
+
+# Độ phóng to của đầu + tên + tim máu trên ảnh. 0 = tự động theo kích thước ảnh (khuyên dùng,
+# để ảnh full map bị Discord thu nhỏ vẫn đọc được). Có thể đặt số như 2, 3.5...
+player-scale: 0
