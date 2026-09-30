@@ -13,8 +13,11 @@ jobs:
           java-version: '21'
           cache: maven
       - name: Build
-        run: mvn -B package
+        run: |
+          POM=$(find . -name pom.xml | head -1)
+          echo "Tìm thấy: $POM"
+          mvn -B -f "$POM" package
       - uses: actions/upload-artifact@v4
         with:
           name: SquareShot
-          path: target/SquareShot.jar
+          path: '**/target/SquareShot.jar'
